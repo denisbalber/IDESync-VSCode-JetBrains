@@ -7,6 +7,7 @@ interface SyncState {
     column: number;
     source: 'vscode' | 'jetbrains';
     isActive: boolean;
+    action?: 'close';  // Add action field for document close events
 }
 
 export class VSCodeJetBrainsSync {
@@ -157,6 +158,22 @@ export class VSCodeJetBrainsSync {
             })
         );
 
+        // Listen for document close events
+        this.disposables.push(
+            vscode.workspace.onDidCloseTextDocument((document) => {
+                if (!this.isHandlingExternalUpdate) {
+                    this.updateState({
+                        filePath: document.uri.fsPath,
+                        line: 0,
+                        column: 0,
+                        source: 'vscode',
+                        isActive: this.isActive,
+                        action: 'close'
+                    });
+                }
+            })
+        );
+
         // Listen for cursor position changes
         this.disposables.push(
             vscode.window.onDidChangeTextEditorSelection((event) => {
@@ -206,6 +223,18 @@ export class VSCodeJetBrainsSync {
 
         try {
             this.isHandlingExternalUpdate = true;
+            
+            // Handle document close action
+            if (state.action === 'close') {
+                const openEditors = vscode.window.visibleTextEditors;
+                const editorToClose = openEditors.find(editor => editor.document.uri.fsPath === state.filePath);
+                if (editorToClose) {
+                    await vscode.window.showTextDocument(editorToClose.document);
+                    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                }
+                return;
+            }
+
             const uri = vscode.Uri.file(state.filePath);
             const document = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(document, {preview: false});

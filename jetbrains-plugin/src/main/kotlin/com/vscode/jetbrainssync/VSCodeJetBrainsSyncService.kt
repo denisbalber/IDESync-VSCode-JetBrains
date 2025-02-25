@@ -27,7 +27,8 @@ data class EditorState(
     val line: Int,
     val column: Int,
     val source: String? = "jetbrains",
-    val isActive: Boolean = false
+    val isActive: Boolean = false,
+    val action: String? = null
 )
 
 @Service(Service.Level.PROJECT)
@@ -206,6 +207,19 @@ class VSCodeJetBrainsSyncService(private val project: Project) {
                     }
                 }
 
+                override fun fileClosed(source: FileEditorManager, file: VirtualFile) {
+                    if (!isHandlingExternalUpdate) {
+                        val state = EditorState(
+                            filePath = file.path,
+                            line = 0,
+                            column = 0,
+                            isActive = isActive,
+                            action = "close"
+                        )
+                        updateState(state)
+                    }
+                }
+
                 override fun selectionChanged(event: FileEditorManagerEvent) {
                     if (!isHandlingExternalUpdate && event.newFile != null) {
                         val editor = FileEditorManager.getInstance(project).selectedTextEditor
@@ -275,6 +289,16 @@ class VSCodeJetBrainsSyncService(private val project: Project) {
         try {
             ApplicationManager.getApplication().invokeLater {
                 try {
+                    // Handle document close action
+                    if (state.action == "close") {
+                        val file = File(state.filePath)
+                        val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(file)
+                        virtualFile?.let {
+                            FileEditorManager.getInstance(project).closeFile(it)
+                        }
+                        return@invokeLater
+                    }
+
                     val file = File(state.filePath)
                     val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(file)
 
