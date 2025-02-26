@@ -10,6 +10,46 @@ interface SyncState {
     action?: 'close';  // Add action field for document close events
 }
 
+class Logger {
+    private outputChannel: vscode.OutputChannel;
+
+    constructor(channelName: string) {
+        this.outputChannel = vscode.window.createOutputChannel(channelName);
+    }
+
+    private formatMessage(level: string, message: string): string {
+        const timestamp = new Date().toISOString();
+        return `[${timestamp}] [${level}] ${message}`;
+    }
+
+    info(message: string) {
+        const formattedMessage = this.formatMessage('INFO', message);
+        this.outputChannel.appendLine(formattedMessage);
+    }
+
+    warn(message: string) {
+        const formattedMessage = this.formatMessage('WARN', message);
+        this.outputChannel.appendLine(formattedMessage);
+    }
+
+    error(message: string, error?: Error) {
+        const formattedMessage = this.formatMessage('ERROR', message);
+        this.outputChannel.appendLine(formattedMessage);
+        if (error) {
+            this.outputChannel.appendLine(this.formatMessage('ERROR', `Stack: ${error.stack}`));
+        }
+    }
+
+    debug(message: string) {
+        const formattedMessage = this.formatMessage('DEBUG', message);
+        this.outputChannel.appendLine(formattedMessage);
+    }
+
+    dispose() {
+        this.outputChannel.dispose();
+    }
+}
+
 export class VSCodeJetBrainsSync {
     private wss: WebSocketServer | null = null;
     private jetbrainsClient: WebSocket | null = null;
@@ -19,18 +59,20 @@ export class VSCodeJetBrainsSync {
     private statusBarItem: vscode.StatusBarItem;
     private isConnected: boolean = false;
     private autoReconnect: boolean = false;
+    private logger: Logger;
 
     constructor() {
+        this.logger = new Logger('IDE Sync');
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.statusBarItem.command = 'vscode-jetbrains-sync.toggleAutoReconnect';
         this.updateStatusBarItem();
         this.statusBarItem.show();
         
-        // Initialize WebSocket server
         this.setupServer();
         this.setupEditorListeners();
         this.setupWindowListeners();
         this.isActive = vscode.window.state.focused;
+        this.logger.info('VSCodeJetBrainsSync initialized');
     }
 
     private updateStatusBarItem() {
@@ -56,7 +98,7 @@ export class VSCodeJetBrainsSync {
             }
             if (this.wss) {
                 this.wss.close(() => {
-                    console.log('WebSocket server closed');
+                    this.logger.info('WebSocket server closed');
                 });
                 this.wss = null;
             }
@@ -72,21 +114,22 @@ export class VSCodeJetBrainsSync {
 
     private setupServer() {
         if (!this.autoReconnect) {
+            this.logger.info('Auto-reconnect is disabled');
             return;
         }
 
         if (this.wss) {
             this.wss.close(() => {
-                console.log('Closing existing WebSocket server');
+                this.logger.info('Closing existing WebSocket server');
             });
         }
 
         const port = vscode.workspace.getConfiguration('vscode-jetbrains-sync').get('port', 3000);
         this.wss = new WebSocketServer({ port });
-        console.log(`Starting WebSocket server on port ${port}...`);
+        this.logger.info(`Starting WebSocket server on port ${port}...`);
         
         this.wss.on('connection', (ws: WebSocket, request) => {
-            const clientType = request.url?.slice(1); // Remove leading slash
+            const clientType = request.url?.slice(1);
 
             if (clientType === 'jetbrains') {
                 if (this.jetbrainsClient) {
@@ -95,7 +138,7 @@ export class VSCodeJetBrainsSync {
                 this.jetbrainsClient = ws;
                 this.isConnected = true;
                 this.updateStatusBarItem();
-                console.log('JetBrains IDE client connected');
+                this.logger.info('JetBrains IDE client connected');
                 vscode.window.showInformationMessage('JetBrains IDE connected');
             } else {
                 ws.close();
@@ -105,9 +148,10 @@ export class VSCodeJetBrainsSync {
             ws.on('message', (data: RawData) => {
                 try {
                     const state: SyncState = JSON.parse(data.toString());
+                    this.logger.debug(`Received message: ${JSON.stringify(state)}`);
                     this.handleIncomingState(state);
                 } catch (error) {
-                    console.error('Error parsing message:', error);
+                    this.logger.error('Error parsing message:', error as Error);
                     vscode.window.showErrorMessage('Error handling sync message');
                 }
             });
@@ -117,13 +161,13 @@ export class VSCodeJetBrainsSync {
                     this.jetbrainsClient = null;
                     this.isConnected = false;
                     this.updateStatusBarItem();
-                    console.log('JetBrains IDE client disconnected');
+                    this.logger.warn('JetBrains IDE client disconnected');
                     vscode.window.showWarningMessage('JetBrains IDE disconnected');
                 }
             });
 
             ws.on('error', (error: Error) => {
-                console.error('WebSocket error:', error);
+                this.logger.error('WebSocket error:', error);
                 this.isConnected = false;
                 this.updateStatusBarItem();
                 vscode.window.showErrorMessage('WebSocket error occurred');
@@ -131,11 +175,11 @@ export class VSCodeJetBrainsSync {
         });
 
         this.wss.on('listening', () => {
-            console.log(`WebSocket server is listening on port ${port}`);
+            this.logger.info(`WebSocket server is listening on port ${port}`);
         });
 
         this.wss.on('error', (error: Error) => {
-            console.error('WebSocket server error:', error);
+            this.logger.error('WebSocket server error:', error);
             vscode.window.showErrorMessage('Failed to start WebSocket server');
         });
     }
@@ -162,6 +206,7 @@ export class VSCodeJetBrainsSync {
         this.disposables.push(
             vscode.workspace.onDidCloseTextDocument((document) => {
                 if (!this.isHandlingExternalUpdate) {
+                    this.logger.debug(`Document closed: ${document.uri.fsPath}`);
                     this.updateState({
                         filePath: document.uri.fsPath,
                         line: 0,
@@ -217,7 +262,7 @@ export class VSCodeJetBrainsSync {
 
         // Only handle incoming state if the other IDE is active
         if (!state.isActive) {
-            console.log('Ignoring update from inactive JetBrains IDE');
+            this.logger.info('Ignoring update from inactive JetBrains IDE');
             return;
         }
 
@@ -226,10 +271,11 @@ export class VSCodeJetBrainsSync {
             
             // Handle document close action
             if (state.action === 'close') {
-                const openEditors = vscode.window.visibleTextEditors;
-                const editorToClose = openEditors.find(editor => editor.document.uri.fsPath === state.filePath);
+                this.logger.info(`Closing document: ${state.filePath}`);
+                const documents = vscode.workspace.textDocuments;
+                const editorToClose = documents.find(editor => editor.uri.fsPath === state.filePath);
                 if (editorToClose) {
-                    await vscode.window.showTextDocument(editorToClose.document);
+                    await vscode.window.showTextDocument(editorToClose);
                     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
                 }
                 return;
@@ -247,7 +293,7 @@ export class VSCodeJetBrainsSync {
                 vscode.TextEditorRevealType.InCenter
             );
         } catch (error) {
-            console.error('Error handling incoming state:', error);
+            this.logger.error('Error handling incoming state:', error as Error);
             vscode.window.showErrorMessage(`Failed to open file: ${state.filePath}`);
         } finally {
             this.isHandlingExternalUpdate = false;
@@ -258,15 +304,16 @@ export class VSCodeJetBrainsSync {
         this.currentState = state;
         if (this.jetbrainsClient?.readyState === WebSocket.OPEN) {
             try {
-                // Only send updates if we're active
+                // Always send close events, regardless of active state
                 if (this.isActive) {
-                    console.log('Sending state update (VSCode is active):', state);
+                    this.logger.info(`Sending state update (VSCode is active'):`);
+                    this.logger.debug(JSON.stringify(state));
                     this.jetbrainsClient.send(JSON.stringify(state));
                 } else {
-                    console.log('Skipping state update (VSCode is not active)');
+                    this.logger.info('Skipping state update (VSCode is not active)');
                 }
             } catch (error) {
-                console.error('Error sending state:', error);
+                this.logger.error('Error sending state:', error as Error);
                 vscode.window.showErrorMessage('Failed to sync VSCode position');
             }
         }
@@ -275,10 +322,11 @@ export class VSCodeJetBrainsSync {
     public dispose() {
         if (this.wss) {
             this.wss.close(() => {
-                console.log('WebSocket server closed');
+                this.logger.info('WebSocket server closed');
             });
         }
         this.statusBarItem.dispose();
+        this.logger.dispose();
         this.disposables.forEach(d => d.dispose());
     }
 }
